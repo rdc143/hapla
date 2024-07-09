@@ -1,0 +1,2 @@
+[console_scripts]
+hapla = hapla.main:main

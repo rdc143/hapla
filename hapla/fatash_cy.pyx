@@ -104,3 +104,43 @@ cpdef void calcFwdBwd(const double[:,:,::1] E, double[:,:,::1] L, \
 	for w in range(W):
 		for k in range(K):
 			L[i,w,k] = A[w,k] + B[w,k] - ll_fwd
+
+# Viterbi algorithm
+cpdef void calcViterbi(const double[:,:,::1] E, double[:,::1] V, \
+		const double[:,::1] Q, const double[:,::1] T, int[:,::1] B, \
+		int[:,::1] p, const int N, const int i) noexcept nogil:
+	cdef:
+		int W = E.shape[1]
+		int K = E.shape[2]
+		int w, k, k1, k2
+		double max_val
+		int argmax_val
+
+	# Initialization
+	for k in range(K):
+		V[0,k] = E[i,0,k] + log(Q[i//N,k])
+		B[0,k] = -1  # Indicating the start state has no predecessor
+
+	# Recursion
+	for w in range(1, W):
+		for k1 in range(K):
+			max_val = -1e300
+			argmax_val = -1
+			for k2 in range(K):
+				val = V[w-1,k2] + T[k2,k1]
+				if val > max_val:
+					max_val = val
+					argmax_val = k2
+			V[w,k1] = max_val + E[i,w,k1]
+			B[w,k1] = argmax_val
+
+	# Backtrace to find the most probable path
+	p[i,W-1] = 0
+	max_val = -1e300
+	for k in range(K):
+		if V[W-1,k] > max_val:
+			max_val = V[W-1,k]
+			p[i,W-1] = k
+
+	for w in range(W-2, -1, -1):
+		p[i,w] = B[w+1, p[i,w+1]]
