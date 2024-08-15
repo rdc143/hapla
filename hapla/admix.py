@@ -115,7 +115,7 @@ def main(args):
 		# Stabilization step
 		admix_cy.updateP(Z, P, Q, Q_new, k_vec, N, args.threads)
 		admix_cy.updateQ(Q, Q_new, S, args.threads)
-
+		# load true Q here for supervised
 		# Log-likelihood convergence check
 		if ((it+1) % args.check) == 0:
 			admix_cy.loglike(Z, P, Q, l_vec, N, args.threads)

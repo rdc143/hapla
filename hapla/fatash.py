@@ -128,6 +128,9 @@ def main(args):
 			if not args.viterbi:
 				np.savetxt(f"{args.out}.path", L.argmax(axis=2), fmt="%i")
 				print(f"Saved posterior decoding path as {args.out}.path")
+
+				np.savetxt(f"{args.out}.prob", L.max(axis=2), fmt="%.3f")
+				print(f"Saved posterior probabilities as {args.out}.prob")
 			else:
 				np.savetxt(f"{args.out}.path", p, fmt="%i")
 				print(f"Saved most probable path as {args.out}.path")

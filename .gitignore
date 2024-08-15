@@ -1,0 +1,4 @@
+build/
+hapla.egg-info/
+hapla/*.c
+
