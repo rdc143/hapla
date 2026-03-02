@@ -100,12 +100,11 @@ cdef inline f32 _logLike(
     cdef:
         size_t j
         f32 s = 0.0
-        f32 d, f, p
+        f32 f, p
     for j in range(M):
-        d = <f32>r[j]
         f = <f32>c[j] * n
         p = _clamp3(f)
-        s += d * log(p) + (1.0 - d) * log(1.0 - p)
+        s += log(p) if r[j] else log(1.0 - p)
     return s
 
 
@@ -122,7 +121,7 @@ cpdef void marginalMedians(
         size_t k
     for k in range(K):
         if n_vec[k] > 0:
-            _marginal(&R[k,0], &C[k,0], n_vec[k] >> 1, M)
+            _marginal(&R[k, 0], &C[k, 0], n_vec[k] >> 1, M)
 
 # Compute distances and perform cluster assignment
 cpdef void assignClust(
@@ -149,10 +148,8 @@ cpdef void assignClust(
     with nogil, parallel():
         # Thread-local buffer allocation
         n_thr = <u32*>calloc(K, sizeof(u32))
-        if n_thr is NULL:
-            abort()
         C_thr = <u32*>calloc(K*M, sizeof(u32))
-        if C_thr is NULL:
+        if (n_thr is NULL) or (C_thr is NULL):
             abort()
 
         for i in prange(U, schedule='static'):
@@ -296,7 +293,7 @@ cpdef u32 findZero(
         size_t k
         u32 minI = K - 1
         u32 minN = N + 1
-    for k in range(K, -1, -1):
+    for k in range(K - 1, -1, -1):
         if n_vec[k] > 0 and n_vec[k] < minN:
             minI = k
             minN = n_vec[k]
