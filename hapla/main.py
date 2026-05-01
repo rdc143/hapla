@@ -528,18 +528,6 @@ def main():
         help="Path to a single haplotype cluster alleles file",
     )
     parser_eval.add_argument(
-        "-e",
-        "--pfilelist",
-        metavar="FILE",
-        help="Filelist with paths to haplotype cluster frequencies files",
-    )
-    parser_eval.add_argument(
-        "-p",
-        "--pfile",
-        metavar="FILE",
-        help="Path to file with haplotype cluster frequencies",
-    )
-    parser_eval.add_argument(
         "-q", "--qfile", metavar="FILE", help="Path to file with ancestry proportions"
     )
     parser_eval.add_argument(

@@ -1,6 +1,6 @@
 """
 hapla.
-Evaluate fit of admix model by computing correlations of residuals as in evalAdmix.
+Evaluate fit of admix model by computing correlations of residuals.
 """
 
 __author__ = "Thomas Bøggild"
@@ -23,15 +23,8 @@ def main(args, deaf):
     assert (args.filelist is not None) or (args.clusters is not None), (
         "No input data (--filelist or --clusters)!"
     )
-    assert (args.pfilelist is not None) or (args.pfile is not None), (
-        "No P file(s) provided (--pfilelist or --pfile)!"
-    )
-    if args.filelist is not None:
-        assert args.pfilelist is not None, "Input formats don't match!"
-    if args.clusters is not None:
-        assert args.pfile is not None, "Input formats don't match!"
-    assert args.qfile is not None, "No Q file provided (--qfile)!"
     assert args.threads > 0, "Please select a valid number of threads!"
+    assert args.qfile is not None, "No Q file provided (--qfile)!"
 
     start = time()
 
@@ -62,7 +55,6 @@ def main(args, deaf):
 
     # Import numerical libraries and cython functions
     import numpy as np
-    from hapla import functions
     from hapla import eval_cy
 
     # Prepare list of data files
@@ -78,74 +70,58 @@ def main(args, deaf):
                 assert os.path.isfile(f"{z}.win"), "win file doesn't exist!"
                 if len(Z_list) == 1:  # First file
                     z_ids = np.genfromtxt(f"{z}.ids", dtype=np.str_)
-                    w_tmp = np.genfromtxt(f"{z}.win", dtype=int, usecols=[1, 2, 5])
-                    k_vec = w_tmp[:, 2].astype(np.uint32)
-                    N = 2 * z_ids.shape[0]
+                    k_vec = np.genfromtxt(
+                        f"{z}.win", dtype=np.uint32, usecols=[5]
+                    ).reshape(-1)
+                    N = z_ids.shape[0]
                     w_list = [k_vec.shape[0]]
                 else:  # Loop files
                     t_ids = np.genfromtxt(f"{z}.ids", dtype=np.str_)
                     assert np.sum(z_ids != t_ids) == 0, (
                         "Samples do not match across files!"
                     )
-                    w_tmp = np.genfromtxt(f"{z}.win", dtype=int, usecols=[1, 2, 5])
-                    k_vec = np.append(k_vec, w_tmp[:, 2].astype(np.uint32))
-                    w_list.append(w_tmp.shape[0])
+                    k_tmp = np.genfromtxt(
+                        f"{z}.win", dtype=np.uint32, usecols=[5]
+                    ).reshape(-1)
+                    k_vec = np.append(k_vec, k_tmp)
+                    w_list.append(k_tmp.shape[0])
         F = len(Z_list)
         w_vec = np.array(w_list, dtype=np.uint32)
-        del z_ids, t_ids, w_tmp, w_list
+        del z_ids, w_list
     else:  # Single file (chromosome)
         F = 1
         Z_list = [args.clusters]
         assert os.path.isfile(f"{Z_list[0]}.bca"), "bca file doesn't exist!"
         assert os.path.isfile(f"{Z_list[0]}.ids"), "ids file doesn't exist!"
         assert os.path.isfile(f"{Z_list[0]}.win"), "win file doesn't exist!"
-        w_tmp = np.genfromtxt(f"{Z_list[0]}.win", dtype=int, usecols=[1, 2, 5])
-        k_vec = w_tmp[:, 2].astype(np.uint32)
+        k_vec = np.genfromtxt(
+            f"{Z_list[0]}.win", dtype=np.uint32, usecols=[5]
+        ).reshape(-1)
         w_vec = np.array([k_vec.shape[0]], dtype=np.uint32)
-        N = 2 * np.genfromtxt(f"{Z_list[0]}.ids", dtype=np.str_).shape[0]
-        del w_tmp
+        N = np.genfromtxt(f"{Z_list[0]}.ids", dtype=np.str_).shape[0]
     print(f"Parsing {F} file(s).")
 
     # Load Q matrix
-    Q = np.genfromtxt(args.qfile, dtype=float)
-    Q = np.repeat(Q, 2, axis=0)
+    Q = np.ascontiguousarray(np.genfromtxt(args.qfile, dtype=float))
+    if Q.ndim == 1:
+        Q = Q.reshape(-1, 1)
     assert Q.shape[0] == N, "Number of samples doesn't match!"
-    K = Q.shape[1]
+    assert Q.shape[1] > 1, "Please provide at least two ancestral components!"
+    A = np.ascontiguousarray(np.linalg.pinv(np.dot(Q.T, Q)))
 
-    # Prepare list of P files
-    if F > 1:
-        w_cnt = 0
-        P_list = []
-        with open(args.pfilelist) as f:
-            for p, p_file in enumerate(f):
-                assert os.path.isfile(p_file.strip("\n")), (
-                    f"The {p + 1}/{F} matrix file doesn't exist!"
-                )
-                P_list.append(p_file.strip("\n"))
-        assert len(P_list) == F, "Number of files doesn't match!"
-
-    # Covariance container
-    N_ind = N // 2
-    C = np.zeros((N_ind, N_ind), dtype=np.float64)
+    # Covariance containers
+    C = np.zeros((N, N), dtype=np.float64)
+    V = np.zeros(N, dtype=np.float64)
 
     # Loop over chromosomes
-    print(f"Computing correlations of residuals")
+    print("Computing correlations of residuals.")
+    w_cnt = 0
     for z in np.arange(F):  # Loop through files
         print(f"Processing file {z + 1}/{F}")
         t_chr = time()
         W_chr = w_vec[z]
-
-        # Load P matrix file
-        if F > 1:
-            P_chr = np.genfromtxt(P_list[z], dtype=float).reshape(-1)
-            k_chr = k_vec[w_cnt : (w_cnt + W_chr)]
-            w_cnt += W_chr
-        else:
-            P_chr = np.genfromtxt(args.pfile, dtype=float).reshape(-1)
-            k_chr = k_vec
-        c_chr = np.insert(np.cumsum(k_chr * K, dtype=np.uint32), 0, 0)
-        L_chr = np.sum(k_chr, dtype=int)
-        assert P_chr.shape[0] == (L_chr * K), "Number of clusters doesn't match!"
+        k_chr = k_vec[w_cnt : (w_cnt + W_chr)]
+        w_cnt += W_chr
 
         # Load haplotype cluster assignment file
         with open(f"{Z_list[z]}.bca", "rb") as f:
@@ -157,30 +133,38 @@ def main(args, deaf):
 
             # Add haplotype cluster assignments to container
             Z_chr = np.fromfile(f, dtype=np.uint8)
-            Z_chr.shape = (W_chr, N)
+            Z_chr.shape = (W_chr, 2 * N)
         assert np.max(k_chr) == (np.max(Z_chr) + 1), "Number of clusters doesn't match!"
 
-        # Convert assignments to one-hot encoding one window at a time, compute expected assignments,
-        # then residuals and lastly covariances
-        eval_cy.covar(C, Q, P_chr, Z_chr, k_chr, c_chr, K)
-        
+        # Project cluster counts onto the ADMIXTURE Q-space and accumulate residual covariances.
+        eval_cy.covar(C, V, Q, A, Z_chr, k_chr)
+
         if F > 1:
             # Print elapsed time of chromosome
             t_tmp = time() - t_chr
             t_min = int(t_tmp // 60)
             t_sec = int(t_tmp - t_min * 60)
             print(f"Elapsed time: {t_min}m{t_sec}s\n")
+    # Estimate model-expected covariance of residuals and convert into correlations
+    S = np.dot(Q.T, V.reshape(-1, 1) * Q)
+    B = np.ascontiguousarray(np.dot(A, np.dot(S, A)))
+    QA = np.ascontiguousarray(np.dot(Q, A))
+    QB = np.ascontiguousarray(np.dot(Q, B))
+    C_exp = np.zeros_like(C)
+    eval_cy.expected(C_exp, Q, QA, QB, V)
+    b_hat = np.zeros_like(C)
+    c_hat = np.zeros_like(C)
+    eval_cy.corr(C, b_hat)
+    eval_cy.corr(C_exp, c_hat)
+    cor = b_hat - c_hat
 
-    
-    # Sum covariances over chromosomes and convert into correlations
-    cor = np.zeros((N_ind, N_ind), dtype=np.float64)
-    eval_cy.corr(C, cor)
-    
-    # Write correlations to file
+    # Write correlations to files
+    np.savetxt(f"{args.out}.bhat", b_hat, fmt="%.4f")
+    np.savetxt(f"{args.out}.chat", c_hat, fmt="%.4f")
     np.savetxt(f"{args.out}.corres", cor, fmt="%.4f")
 
     # Clean
-    del C, cor
+    del C, C_exp, b_hat, c_hat, cor
 
     # Print elapsed time for computation
     t_tot = time() - start
@@ -190,7 +174,9 @@ def main(args, deaf):
 
     # Write to log-file
     with open(f"{args.out}.log", "a") as log:
-        log.write(f"\nSaved correlations of residuals as {args.out}.corres\n")
+        log.write(f"\nSaved empirical correlations of residuals as {args.out}.bhat\n")
+        log.write(f"Saved model-expected correlations of residuals as {args.out}.chat\n")
+        log.write(f"Saved corrected correlations of residuals as {args.out}.corres\n")
         log.write(f"\nTotal elapsed time: {t_min}m{t_sec}s\n")
 
 
