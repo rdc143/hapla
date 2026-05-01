@@ -494,6 +494,48 @@ def main():
         help="Use simplified transition probabibilities in HMM",
     )
 
+    # hapla eval
+    parser_eval = subparsers.add_parser("eval")
+    parser_eval.add_argument("--version", action="version", version=f"v{__version__}")
+    parser_eval.add_argument(
+        "-f",
+        "--filelist",
+        metavar="FILE",
+        help="Filelist with paths to haplotype cluster alleles files",
+    )
+    parser_eval.add_argument(
+        "-z",
+        "--clusters",
+        metavar="FILE",
+        help="Path to a single haplotype cluster alleles file",
+    )
+    parser_eval.add_argument(
+        "-e",
+        "--pfilelist",
+        metavar="FILE",
+        help="Filelist with paths to haplotype cluster frequencies files",
+    )
+    parser_eval.add_argument(
+        "-p",
+        "--pfile",
+        metavar="FILE",
+        help="Path to file with haplotype cluster frequencies",
+    )
+    parser_eval.add_argument(
+        "-q", "--qfile", metavar="FILE", help="Path to file with ancestry proportions"
+    )
+    parser_eval.add_argument(
+        "-t",
+        "--threads",
+        type=int,
+        default=1,
+        metavar="INT",
+        help="Number of threads (1)",
+    )
+    parser_eval.add_argument(
+        "-o", "--out", default="hapla.eval", metavar="OUTPUT", help="Output prefix"
+    )
+
     # Parse arguments
     args = parser.parse_args()
     if len(sys.argv) < 2:
@@ -555,6 +597,18 @@ def main():
 
             deaf = vars(parser_fatash.parse_args([]))
             fatash.main(args, deaf)
+
+
+    # hapla eval
+    if sys.argv[1] == "eval":
+        if len(sys.argv) < 3:
+            parser_eval.print_help()
+            sys.exit()
+        else:
+            from hapla import eval
+
+            deaf = vars(parser_eval.parse_args([]))
+            eval.main(args, deaf)
 
 
 ##### Define main #####
