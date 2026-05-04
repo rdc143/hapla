@@ -76,6 +76,13 @@ def main(args, deaf):
     from hapla import admix_cy
     from hapla import shared_cy
 
+    def missing_file(z):
+        for suffix in (".bcmis", ".bca.miss", ".miss"):
+            m_file = f"{z}{suffix}"
+            if os.path.isfile(m_file):
+                return m_file
+        return None
+
     # Prepare list of data files
     if args.filelist is not None:
         W = 0  # Counter for windows
@@ -122,6 +129,8 @@ def main(args, deaf):
     # Load haplotype cluster assignments from binary hapla format
     B = 0
     Z = np.zeros((W, 2 * N), dtype=np.uint8)
+    Z_miss = None
+    miss_count = 0
     for z in np.arange(F):
         with open(f"{Z_list[z]}.bca", "rb") as f:
             # Check magic numbers
@@ -134,9 +143,40 @@ def main(args, deaf):
             z_tmp = np.fromfile(f, dtype=np.uint8)
             z_tmp = z_tmp.reshape(w_vec[z], 2 * N)
             Z[B : (B + w_vec[z]), :] = z_tmp
+
+            # Add missingness sidecar mask when present
+            m_file = missing_file(Z_list[z])
+            if m_file is not None:
+                m_tmp = np.fromfile(m_file, dtype=np.uint8)
+                m_size = w_vec[z] * 2 * N
+                if m_tmp.shape[0] == (m_size + 3):
+                    assert np.allclose(
+                        m_tmp[:3], np.array([7, 9, 14], dtype=np.uint8)
+                    ), "Magic number doesn't match missingness mask format!"
+                    m_tmp = m_tmp[3:]
+                assert m_tmp.shape[0] == m_size, (
+                    "Missingness mask doesn't match cluster assignments!"
+                )
+                m_tmp = (m_tmp.reshape(w_vec[z], 2 * N) > 0).astype(np.uint8)
+                if np.any(m_tmp):
+                    if Z_miss is None:
+                        Z_miss = np.zeros_like(Z)
+                    Z_miss[B : (B + w_vec[z]), :] = m_tmp
+                    miss_count += np.sum(m_tmp, dtype=np.uint64)
             B += w_vec[z]
         print(f"\rParsed file {z + 1}/{F}", end="")
     del magic, z_tmp
+    has_missing = Z_miss is not None
+    if has_missing:
+        H_obs = (Z_miss.reshape(W, N, 2) == 0).sum(axis=2, dtype=np.uint32)
+        q_obs = np.sum(H_obs, axis=0, dtype=np.uint32)
+        w_obs = np.sum(Z_miss == 0, axis=1, dtype=np.uint32)
+        obs_count = np.sum(w_obs, dtype=np.uint64)
+    else:
+        H_obs = None
+        q_obs = None
+        w_obs = None
+        obs_count = np.uint64(W * 2 * N)
 
     # Count haplotype cluster alleles
     M = np.sum(k_vec, dtype=np.uint32)
@@ -150,6 +190,12 @@ def main(args, deaf):
         + f"- {W} windows\n"
         + f"- {M} clusters\n"
     )
+    if has_missing:
+        print(
+            "Detected missingness sidecar mask:\n"
+            + f"- {miss_count} missing assignments\n"
+            + f"- {obs_count} observed assignments\n"
+        )
 
     # Set up parameters
     rng = np.random.default_rng(args.seed)
@@ -176,7 +222,10 @@ def main(args, deaf):
         Q /= np.sum(Q, axis=1, keepdims=True)
         P[:, x] = 0.0
         c_tmp = np.insert(np.cumsum(k_vec, dtype=np.uint32), 0, 0)
-        admix_cy.superP(Z, P, k_vec, c_tmp, y)
+        if has_missing:
+            admix_cy.superPMiss(Z, Z_miss, P, k_vec, c_tmp, y)
+        else:
+            admix_cy.superP(Z, P, k_vec, c_tmp, y)
         admix_cy.superQ(Q, y)
         P = P.flatten()
         del x, c_tmp
@@ -233,13 +282,35 @@ def main(args, deaf):
             ts = time()
             p_vec = np.zeros(M, dtype=np.float32)
             c_tmp = np.insert(np.cumsum(k_vec, dtype=np.uint32), 0, 0)
-            shared_cy.estimateFreq(Z, p_vec, k_vec, c_tmp)
+            if has_missing:
+                shared_cy.estimateFreqMiss(Z, Z_miss, p_vec, k_vec, c_tmp)
+            else:
+                shared_cy.estimateFreq(Z, p_vec, k_vec, c_tmp)
             if F > 1:  # Initialize based on subsampled chromosomes/files
                 W_s = f_vec[ceil(F / args.subsampling)]
-                U_s, S, V = functions.centerSVD(
-                    Z, p_vec, k_vec, c_tmp, W_s, args.K, args.chunk, args.power, rng
-                )
-                U_r = functions.centerSub(Z, S, V, p_vec, k_vec, c_tmp, W_s, args.chunk)
+                if has_missing:
+                    U_s, S, V = functions.centerSVDMiss(
+                        Z,
+                        Z_miss,
+                        p_vec,
+                        k_vec,
+                        c_tmp,
+                        W_s,
+                        args.K,
+                        args.chunk,
+                        args.power,
+                        rng,
+                    )
+                    U_r = functions.centerSubMiss(
+                        Z, Z_miss, S, V, p_vec, k_vec, c_tmp, W_s, args.chunk
+                    )
+                else:
+                    U_s, S, V = functions.centerSVD(
+                        Z, p_vec, k_vec, c_tmp, W_s, args.K, args.chunk, args.power, rng
+                    )
+                    U_r = functions.centerSub(
+                        Z, S, V, p_vec, k_vec, c_tmp, W_s, args.chunk
+                    )
                 P, Q = functions.factorSub(
                     U_s,
                     U_r,
@@ -255,9 +326,23 @@ def main(args, deaf):
                 )
                 del U_s, U_r
             else:
-                U, S, V = functions.centerSVD(
-                    Z, p_vec, k_vec, c_tmp, W, args.K, args.chunk, args.power, rng
-                )
+                if has_missing:
+                    U, S, V = functions.centerSVDMiss(
+                        Z,
+                        Z_miss,
+                        p_vec,
+                        k_vec,
+                        c_tmp,
+                        W,
+                        args.K,
+                        args.chunk,
+                        args.power,
+                        rng,
+                    )
+                else:
+                    U, S, V = functions.centerSVD(
+                        Z, p_vec, k_vec, c_tmp, W, args.K, args.chunk, args.power, rng
+                    )
                 P, Q = functions.factorALS(
                     U, S, V, p_vec, k_vec, c_tmp, args.als_iter, args.als_tole, rng
                 )
@@ -276,20 +361,35 @@ def main(args, deaf):
         P2 = np.zeros_like(P)
 
     # Estimate initial log-likelihood
-    L_pre = admix_cy.loglike(Z, P, Q, c_vec)
+    if has_missing:
+        L_pre = admix_cy.loglikeMiss(Z, Z_miss, P, Q, c_vec)
+    else:
+        L_pre = admix_cy.loglike(Z, P, Q, c_vec)
     print(f"Initial log-like: {L_pre * L_nrm:.1f}")
 
     # Accelerated priming iteration
     ts = time()
     print("Priming iteration.", end="", flush=True)
     if args.projection is None:
-        functions.steps(Z, P, Q, Q_tmp, k_vec, c_vec, y, L)
-        functions.quasi(Z, P, Q, Q_tmp, P1, P2, Q1, Q2, k_vec, c_vec, y, L)
-        functions.steps(Z, P, Q, Q_tmp, k_vec, c_vec, y, L)
+        if has_missing:
+            functions.stepsMiss(Z, Z_miss, P, Q, Q_tmp, k_vec, c_vec, y, L, w_obs, q_obs)
+            functions.quasiMiss(
+                Z, Z_miss, P, Q, Q_tmp, P1, P2, Q1, Q2, k_vec, c_vec, y, L, w_obs, q_obs
+            )
+            functions.stepsMiss(Z, Z_miss, P, Q, Q_tmp, k_vec, c_vec, y, L, w_obs, q_obs)
+        else:
+            functions.steps(Z, P, Q, Q_tmp, k_vec, c_vec, y, L)
+            functions.quasi(Z, P, Q, Q_tmp, P1, P2, Q1, Q2, k_vec, c_vec, y, L)
+            functions.steps(Z, P, Q, Q_tmp, k_vec, c_vec, y, L)
     else:
-        functions.proSteps(Z, P, Q, Q_tmp, c_vec)
-        functions.proQuasi(Z, P, Q, Q_tmp, Q1, Q2, c_vec)
-        functions.proSteps(Z, P, Q, Q_tmp, c_vec)
+        if has_missing:
+            functions.proStepsMiss(Z, Z_miss, P, Q, Q_tmp, c_vec, q_obs)
+            functions.proQuasiMiss(Z, Z_miss, P, Q, Q_tmp, Q1, Q2, c_vec, q_obs)
+            functions.proStepsMiss(Z, Z_miss, P, Q, Q_tmp, c_vec, q_obs)
+        else:
+            functions.proSteps(Z, P, Q, Q_tmp, c_vec)
+            functions.proQuasi(Z, P, Q, Q_tmp, Q1, Q2, c_vec)
+            functions.proSteps(Z, P, Q, Q_tmp, c_vec)
     print(f"\rPriming iteration.\t\t({time() - ts:.1f}s)\n")
 
     # Set up mini-batch parameters
@@ -312,26 +412,102 @@ def main(args, deaf):
                 s_end = W if b == (args.batches - 1) else (b + 1) * W_bat
                 s_bat = s_win[s_beg:s_end]
                 if args.projection is None:
-                    functions.batQuasi(
-                        Z, P, Q, Q_tmp, P1, P2, Q1, Q2, k_vec, c_vec, s_bat, y, L
+                    if has_missing:
+                        functions.batQuasiMiss(
+                            Z,
+                            Z_miss,
+                            P,
+                            Q,
+                            Q_tmp,
+                            P1,
+                            P2,
+                            Q1,
+                            Q2,
+                            k_vec,
+                            c_vec,
+                            s_bat,
+                            y,
+                            L,
+                            w_obs,
+                            H_obs,
+                        )
+                    else:
+                        functions.batQuasi(
+                            Z, P, Q, Q_tmp, P1, P2, Q1, Q2, k_vec, c_vec, s_bat, y, L
+                        )
+                else:
+                    if has_missing:
+                        functions.proBatchMiss(
+                            Z, Z_miss, P, Q, Q_tmp, Q1, Q2, c_vec, s_bat, H_obs
+                        )
+                    else:
+                        functions.proBatch(Z, P, Q, Q_tmp, Q1, Q2, c_vec, s_bat)
+            if args.projection is None:
+                if has_missing:
+                    functions.quasiMiss(
+                        Z,
+                        Z_miss,
+                        P,
+                        Q,
+                        Q_tmp,
+                        P1,
+                        P2,
+                        Q1,
+                        Q2,
+                        k_vec,
+                        c_vec,
+                        y,
+                        L,
+                        w_obs,
+                        q_obs,
                     )
                 else:
-                    functions.proBatch(Z, P, Q, Q_tmp, Q1, Q2, c_vec, s_bat)
-            if args.projection is None:
-                functions.quasi(Z, P, Q, Q_tmp, P1, P2, Q1, Q2, k_vec, c_vec, y, L)
+                    functions.quasi(Z, P, Q, Q_tmp, P1, P2, Q1, Q2, k_vec, c_vec, y, L)
             else:
-                functions.proQuasi(Z, P, Q, Q_tmp, Q1, Q2, c_vec)
+                if has_missing:
+                    functions.proQuasiMiss(Z, Z_miss, P, Q, Q_tmp, Q1, Q2, c_vec, q_obs)
+                else:
+                    functions.proQuasi(Z, P, Q, Q_tmp, Q1, Q2, c_vec)
         else:  # Full updates
             if args.projection is None:
-                functions.quasi(Z, P, Q, Q_tmp, P1, P2, Q1, Q2, k_vec, c_vec, y, L)
-                functions.steps(Z, P, Q, Q_tmp, k_vec, c_vec, y, L)
+                if has_missing:
+                    functions.quasiMiss(
+                        Z,
+                        Z_miss,
+                        P,
+                        Q,
+                        Q_tmp,
+                        P1,
+                        P2,
+                        Q1,
+                        Q2,
+                        k_vec,
+                        c_vec,
+                        y,
+                        L,
+                        w_obs,
+                        q_obs,
+                    )
+                    functions.stepsMiss(
+                        Z, Z_miss, P, Q, Q_tmp, k_vec, c_vec, y, L, w_obs, q_obs
+                    )
+                else:
+                    functions.quasi(Z, P, Q, Q_tmp, P1, P2, Q1, Q2, k_vec, c_vec, y, L)
+                    functions.steps(Z, P, Q, Q_tmp, k_vec, c_vec, y, L)
             else:
-                functions.proSteps(Z, P, Q, Q_tmp, c_vec)
-                functions.proQuasi(Z, P, Q, Q_tmp, Q1, Q2, c_vec)
+                if has_missing:
+                    functions.proStepsMiss(Z, Z_miss, P, Q, Q_tmp, c_vec, q_obs)
+                    functions.proQuasiMiss(Z, Z_miss, P, Q, Q_tmp, Q1, Q2, c_vec, q_obs)
+                else:
+                    functions.proSteps(Z, P, Q, Q_tmp, c_vec)
+                    functions.proQuasi(Z, P, Q, Q_tmp, Q1, Q2, c_vec)
 
         # Log-likelihood convergence check
         if ((it + 1) % args.check) == 0:
-            L_cur = admix_cy.loglike(Z, P, Q, c_vec)
+            if has_missing:
+                L_cur = admix_cy.loglikeMiss(Z, Z_miss, P, Q, c_vec)
+            else:
+                L_cur = admix_cy.loglike(Z, P, Q, c_vec)
             print(
                 f"({it + 1})\tLog-like: {L_cur * L_nrm:.1f}\t({time() - ts:.1f}s)",
                 flush=True,
@@ -347,11 +523,35 @@ def main(args, deaf):
                         print("Running standard updates.")
                     L_pre = L_cur
                     if args.projection is None:
-                        functions.quasi(
-                            Z, P, Q, Q_tmp, P1, P2, Q1, Q2, k_vec, c_vec, y, L
-                        )
+                        if has_missing:
+                            functions.quasiMiss(
+                                Z,
+                                Z_miss,
+                                P,
+                                Q,
+                                Q_tmp,
+                                P1,
+                                P2,
+                                Q1,
+                                Q2,
+                                k_vec,
+                                c_vec,
+                                y,
+                                L,
+                                w_obs,
+                                q_obs,
+                            )
+                        else:
+                            functions.quasi(
+                                Z, P, Q, Q_tmp, P1, P2, Q1, Q2, k_vec, c_vec, y, L
+                            )
                     else:
-                        functions.proQuasi(Z, P, Q, Q_tmp, Q1, Q2, c_vec)
+                        if has_missing:
+                            functions.proQuasiMiss(
+                                Z, Z_miss, P, Q, Q_tmp, Q1, Q2, c_vec, q_obs
+                            )
+                        else:
+                            functions.proQuasi(Z, P, Q, Q_tmp, Q1, Q2, c_vec)
                 else:
                     L_bat = L_cur
             else:  # Check for convergence
