@@ -269,6 +269,11 @@ def main():
         "-o", "--out", default="hapla.admix", metavar="OUTPUT", help="Output prefix"
     )
     parser_admix.add_argument(
+        "--keep",
+        metavar="FILE",
+        help="File with sample IDs to include, one ID per line",
+    )
+    parser_admix.add_argument(
         "--seed", type=int, default=42, metavar="INT", help="Random seed (42)"
     )
     parser_admix.add_argument(

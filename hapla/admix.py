@@ -24,6 +24,8 @@ def main(args, deaf):
         "No input data (--filelist or --clusters)!"
     )
     assert args.K > 1, "Please select K > 1!"
+    if args.keep is not None:
+        assert os.path.isfile(args.keep), "Keep file doesn't exist!"
     assert args.threads > 0, "Please select a valid number of threads!"
     assert args.seed >= 0, "Please select a valid seed!"
     assert args.iter > 0, "Please select a valid number of iterations!"
@@ -83,6 +85,14 @@ def main(args, deaf):
                 return m_file
         return None
 
+    def read_keep_ids(k_file):
+        ids = np.genfromtxt(k_file, dtype=np.str_, comments=None)
+        ids = np.asarray(ids)
+        if ids.ndim == 0:
+            ids = ids.reshape(1)
+        assert ids.ndim == 1, "Keep file must contain one sample ID per line!"
+        return np.atleast_1d(ids).astype(np.str_)
+
     # Prepare list of data files
     if args.filelist is not None:
         W = 0  # Counter for windows
@@ -96,13 +106,13 @@ def main(args, deaf):
                 assert os.path.isfile(f"{z}.ids"), "ids file doesn't exist!"
                 assert os.path.isfile(f"{z}.win"), "win file doesn't exist!"
                 if W == 0:  # First file
-                    z_ids = np.genfromtxt(f"{z}.ids", dtype=np.str_)
+                    z_ids = np.atleast_1d(np.genfromtxt(f"{z}.ids", dtype=np.str_))
                     k_vec = np.genfromtxt(f"{z}.win", dtype=np.uint32, usecols=[5])
-                    N = z_ids.shape[0]
+                    N_all = z_ids.shape[0]
                     W = k_vec.shape[0]
                     w_list = [W]
                 else:  # Loop files
-                    t_ids = np.genfromtxt(f"{z}.ids", dtype=np.str_)
+                    t_ids = np.atleast_1d(np.genfromtxt(f"{z}.ids", dtype=np.str_))
                     assert np.sum(z_ids != t_ids) == 0, (
                         "Samples don't match across files!"
                     )
@@ -113,7 +123,7 @@ def main(args, deaf):
         F = len(Z_list)
         w_vec = np.array(w_list, dtype=np.uint32)
         f_vec = np.insert(np.cumsum(w_vec, dtype=np.uint32), 0, 0)
-        del z_ids, t_ids, k_tmp, w_list
+        del w_list
     else:  # Single file (chromosome)
         F = 1
         Z_list = [args.clusters]
@@ -121,9 +131,26 @@ def main(args, deaf):
         assert os.path.isfile(f"{Z_list[0]}.ids"), "ids file doesn't exist!"
         assert os.path.isfile(f"{Z_list[0]}.win"), "win file doesn't exist!"
         k_vec = np.genfromtxt(f"{Z_list[0]}.win", dtype=np.uint32, usecols=[5])
-        N = np.genfromtxt(f"{Z_list[0]}.ids", dtype=np.str_).shape[0]
+        z_ids = np.atleast_1d(np.genfromtxt(f"{Z_list[0]}.ids", dtype=np.str_))
+        N_all = z_ids.shape[0]
         W = k_vec.shape[0]
         w_vec = np.array([W], dtype=np.uint32)
+
+    # Select samples from keep file
+    if args.keep is not None:
+        keep_ids = read_keep_ids(args.keep)
+        keep_idx = np.flatnonzero(np.isin(z_ids, keep_ids)).astype(np.uint32)
+        assert keep_idx.shape[0] > 0, "No samples from keep file found in ids file!"
+        hap_idx = np.empty(keep_idx.shape[0] * 2, dtype=np.uint32)
+        hap_idx[0::2] = 2 * keep_idx
+        hap_idx[1::2] = 2 * keep_idx + 1
+        N = keep_idx.shape[0]
+        print(f"Keeping {N}/{N_all} samples from {args.keep}.")
+        del keep_ids
+    else:
+        keep_idx = None
+        hap_idx = None
+        N = N_all
     print(f"Parsing {F} file(s).")
 
     # Load haplotype cluster assignments from binary hapla format
@@ -141,14 +168,16 @@ def main(args, deaf):
 
             # Add haplotype cluster assignments to container
             z_tmp = np.fromfile(f, dtype=np.uint8)
-            z_tmp = z_tmp.reshape(w_vec[z], 2 * N)
+            z_tmp = z_tmp.reshape(w_vec[z], 2 * N_all)
+            if hap_idx is not None:
+                z_tmp = z_tmp[:, hap_idx]
             Z[B : (B + w_vec[z]), :] = z_tmp
 
             # Add missingness sidecar mask when present
             m_file = missing_file(Z_list[z])
             if m_file is not None:
                 m_tmp = np.fromfile(m_file, dtype=np.uint8)
-                m_size = w_vec[z] * 2 * N
+                m_size = w_vec[z] * 2 * N_all
                 if m_tmp.shape[0] == (m_size + 3):
                     assert np.allclose(
                         m_tmp[:3], np.array([7, 9, 14], dtype=np.uint8)
@@ -157,7 +186,10 @@ def main(args, deaf):
                 assert m_tmp.shape[0] == m_size, (
                     "Missingness mask doesn't match cluster assignments!"
                 )
-                m_tmp = (m_tmp.reshape(w_vec[z], 2 * N) > 0).astype(np.uint8)
+                m_tmp = m_tmp.reshape(w_vec[z], 2 * N_all)
+                if hap_idx is not None:
+                    m_tmp = m_tmp[:, hap_idx]
+                m_tmp = (m_tmp > 0).astype(np.uint8)
                 if np.any(m_tmp):
                     if Z_miss is None:
                         Z_miss = np.zeros_like(Z)
@@ -206,6 +238,8 @@ def main(args, deaf):
             "Population assignment file doesn't exist!"
         )
         y = np.genfromtxt(args.supervised, dtype=np.uint8).reshape(-1)
+        if args.keep is not None and y.shape[0] == N_all:
+            y = y[keep_idx]
         assert y.shape[0] == N, "Number of samples differ between files!"
         assert np.max(y) <= args.K, "Wrong number of ancestral sources!"
         assert np.min(y) >= 0, "Wrong format for population assignments!"
