@@ -151,6 +151,7 @@ def main(args, deaf):
         keep_idx = None
         hap_idx = None
         N = N_all
+    q_ids = z_ids if keep_idx is None else z_ids[keep_idx]
     print(f"Parsing {F} file(s).")
 
     # Load haplotype cluster assignments from binary hapla format
@@ -599,7 +600,9 @@ def main(args, deaf):
 
     # Save output
     np.savetxt(f"{f_out}.Q", Q, fmt="%.6f")
+    np.savetxt(f"{f_out}.ids", q_ids, fmt="%s")
     print(f"Saved Q matrix as {f_out}.Q")
+    print(f"Saved Q sample IDs as {f_out}.ids")
     if not args.no_freqs and (args.projection is None):
         if F > 1:  # Save P file for each file (chromosome)
             for p in np.arange(F):
@@ -630,6 +633,7 @@ def main(args, deaf):
         log.write(f"\nFinal log-likelihood: {L_cur:.1f}\n")
         log.write(f"Converged in {it + 1} iterations.\n")
         log.write(f"\nSaved Q matrix as {args.out}.{p_out}K{args.K}.s{args.seed}.Q\n")
+        log.write(f"Saved Q sample IDs as {f_out}.ids\n")
         if not args.no_freqs and (args.projection is None):
             if F > 1:
                 log.write(f"Saved P matrices as {f_out}.{args.prefix}{{1..{F}}}.P\n")

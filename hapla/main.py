@@ -536,6 +536,11 @@ def main():
         "-q", "--qfile", metavar="FILE", help="Path to file with ancestry proportions"
     )
     parser_eval.add_argument(
+        "--keep",
+        metavar="FILE",
+        help="File with sample IDs to include, one ID per line, in Q row order",
+    )
+    parser_eval.add_argument(
         "-t",
         "--threads",
         type=int,
