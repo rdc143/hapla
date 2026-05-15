@@ -381,18 +381,19 @@ def main(args, deaf):
 
                 # Save posterior probabilities
                 if args.save_posteriors:
+                    L_prob = L_ind.max(axis=2)
                     if args.block > 1:  # Convert blocks back to windows
-                        L_ind = np.repeat(
-                            L_ind.max(axis=2),
+                        L_prob = np.repeat(
+                            L_prob,
                             np.append(
-                                np.full(L_ind.shape[1] - 1, args.block),
+                                np.full(L_prob.shape[1] - 1, args.block),
                                 W_chr - ((B_chr - 1) * args.block),
                             ),
                             axis=1,
                         )
 
                     # Save matrices
-                    np.savetxt(f"{f_out}.prob", L_ind, fmt="%.3f")
+                    np.savetxt(f"{f_out}.prob", L_prob, fmt="%.3f")
                     print(f"Saved posterior probabilities as {f_out}.prob")
             del L_ind
         del E_chr
