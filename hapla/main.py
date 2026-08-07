@@ -448,6 +448,14 @@ def main():
         help="Save posterior probabilities from posterior decoding",
     )
     parser_fatash.add_argument(
+        "--phase-correct",
+        nargs="?",
+        const=0,
+        type=int,
+        metavar="INT",
+        help="Correct reciprocal phase switches within a window distance (0)",
+    )
+    parser_fatash.add_argument(
         "--prefix",
         default="chr",
         metavar="OUTPUT",

@@ -196,6 +196,8 @@ hapla fatash --filelist hapla.filelist --qfile hapla.K3.s1.Q --pfilelist hapla.K
 #	- hapla.chr{1..22}.path
 ```
 
+Reciprocal ancestry switches between an individual's haplotypes can optionally be phase-corrected with `--phase-correct [INT]`. Without an integer, only simultaneous breakpoints are corrected; the integer allows breakpoints up to that many windows apart. Phase correction is disabled by default.
+
 
 ### Evaluation of ancestry estimation (Prototype)
 ***hapla eval***\

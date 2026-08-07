@@ -533,6 +533,75 @@ cpdef void voting(
                 D[i, w] = k_idx
         free(k_thr)
 
+# Correct reciprocal phase switches in pairs of haplotypes
+cpdef u32 phaseCorrect(
+        u8[:, ::1] D,
+        f64[:, ::1] L,
+        const u32 distance,
+        bint probabilities
+    ) noexcept nogil:
+    cdef:
+        Py_ssize_t N = D.shape[0] // 2
+        Py_ssize_t W = D.shape[1]
+        Py_ssize_t pending, position
+        size_t i, j, w
+        u32 corrected = 0
+        u8 p0, p1, x0, x1, old, new, pending_old, pending_new
+        f64 tmp
+        bint change0, change1, match, phase
+    for i in prange(N, schedule='guided'):
+        j = 2 * i
+        p0 = D[j, 0]
+        p1 = D[j + 1, 0]
+        pending = -1
+        position = 0
+        phase = False
+        for w in range(1, W):
+            x0 = D[j, w]
+            x1 = D[j + 1, w]
+            change0 = p0 != x0
+            change1 = p1 != x1
+            match = False
+
+            if change0 and change1:
+                match = (p0 == x1) and (p1 == x0)
+                pending = -1
+            elif change0 != change1:
+                if change0:
+                    old = p0
+                    new = x0
+                    if (pending == 1) and (w - position <= distance):
+                        match = (pending_old == new) and (pending_new == old)
+                else:
+                    old = p1
+                    new = x1
+                    if (pending == 0) and (w - position <= distance):
+                        match = (pending_old == new) and (pending_new == old)
+
+                if match:
+                    pending = -1
+                else:
+                    pending = 0 if change0 else 1
+                    position = w
+                    pending_old = old
+                    pending_new = new
+            elif (pending >= 0) and (w - position > distance):
+                pending = -1
+
+            if match:
+                phase = not phase
+                corrected += 1
+            if phase:
+                D[j, w] = x1
+                D[j + 1, w] = x0
+                if probabilities:
+                    tmp = L[j, w]
+                    L[j, w] = L[j + 1, w]
+                    L[j + 1, w] = tmp
+            p0 = x0
+            p1 = x1
+    return corrected
+
 
 ## Estimate file-specific ancestry proportions
 # Log-likelihood

@@ -33,6 +33,8 @@ def main(args, deaf):
     assert args.qfile is not None, "No Q file provided (--qfile)!"
     assert args.threads > 0, "Please select a valid number of threads!"
     assert args.block > 0, "Please select a valid block size!"
+    if args.phase_correct is not None:
+        assert args.phase_correct >= 0, "Please select a valid window distance!"
     if args.alpha is not None:
         assert args.alpha > 0.0, "Please select a valid alpha value!"
     assert args.alpha_min < args.alpha_max, "Please select valid alpha exponents!"
@@ -351,27 +353,15 @@ def main(args, deaf):
                         L_bag[a] = L_ind.max(axis=2)
                 fatash_cy.voting(D_bag, D_ind, K)
 
-                # Save posterior probabilities
+                # Compute posterior probabilities
                 if args.save_posteriors:
-                    L_bag = np.where((D_bag == D_ind[None, :, :]), L_bag, np.nan)
-                    L_bag = np.nanmedian(L_bag, axis=0) * np.mean(
-                        np.isfinite(L_bag), axis=0
+                    L_prob = np.where(
+                        (D_bag == D_ind[None, :, :]), L_bag, np.nan
                     )
-                    if args.block > 1:  # Convert blocks back to windows
-                        L_bag = np.repeat(
-                            L_bag,
-                            np.append(
-                                np.full(L_bag.shape[1] - 1, args.block),
-                                W_chr - ((B_chr - 1) * args.block),
-                            ),
-                            axis=1,
-                        )
-
-                    # Save matrices
-                    np.savetxt(f"{f_out}.prob", L_bag, fmt="%.3f")
-                    print(
-                        f"Saved weighted median posterior probabilities as {f_out}.prob"
+                    L_prob = np.nanmedian(L_prob, axis=0) * np.mean(
+                        np.isfinite(L_prob), axis=0
                     )
+                    prob_mode = "weighted median posterior probabilities"
                     del L_bag
                 del D_bag
             else:
@@ -379,35 +369,41 @@ def main(args, deaf):
                 fatash_cy.fwdbwd(E_chr, L_ind, Q_chr, Q_log, args.alpha, args.simple)
                 D_ind = L_ind.argmax(axis=2).astype(np.uint8)
 
-                # Save posterior probabilities
+                # Compute posterior probabilities
                 if args.save_posteriors:
                     L_prob = L_ind.max(axis=2)
-                    if args.block > 1:  # Convert blocks back to windows
-                        L_prob = np.repeat(
-                            L_prob,
-                            np.append(
-                                np.full(L_prob.shape[1] - 1, args.block),
-                                W_chr - ((B_chr - 1) * args.block),
-                            ),
-                            axis=1,
-                        )
-
-                    # Save matrices
-                    np.savetxt(f"{f_out}.prob", L_prob, fmt="%.3f")
-                    print(f"Saved posterior probabilities as {f_out}.prob")
+                    prob_mode = "posterior probabilities"
             del L_ind
         del E_chr
 
         # Convert blocks back to windows
         if args.block > 1:
-            D_ind = np.repeat(
-                D_ind,
-                np.append(
-                    np.full(D_ind.shape[1] - 1, args.block),
-                    W_chr - ((B_chr - 1) * args.block),
-                ),
-                axis=1,
+            r_chr = np.append(
+                np.full(D_ind.shape[1] - 1, args.block),
+                W_chr - ((B_chr - 1) * args.block),
             )
+            D_ind = np.repeat(D_ind, r_chr, axis=1)
+            if args.save_posteriors and not args.viterbi:
+                L_prob = np.repeat(L_prob, r_chr, axis=1)
+            del r_chr
+
+        # Correct reciprocal phase switches
+        if args.phase_correct is not None:
+            if args.save_posteriors and not args.viterbi:
+                corrected = fatash_cy.phaseCorrect(
+                    D_ind, L_prob, args.phase_correct, True
+                )
+            else:
+                corrected = fatash_cy.phaseCorrect(
+                    D_ind, np.empty((0, 0)), args.phase_correct, False
+                )
+            print(f"Corrected {corrected} reciprocal phase switch(es).")
+
+        # Save posterior probabilities
+        if args.save_posteriors and not args.viterbi:
+            np.savetxt(f"{f_out}.prob", L_prob, fmt="%.3f")
+            print(f"Saved {prob_mode} as {f_out}.prob")
+            del L_prob
 
         # Save matrices
         np.savetxt(f"{f_out}.path", D_ind, fmt="%i")
