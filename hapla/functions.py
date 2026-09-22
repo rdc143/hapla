@@ -9,12 +9,13 @@ from hapla import admix_cy
 
 ### One EM update, sharing scratch across full, batch, and projection modes
 def emStep(P, Q, Pn, Qn, ctx, rows=None, qo=None):
-    Z, k, c, T, pt, qt, wo, y = ctx
-    admix_cy.em(Z, P, Pn, Q, T, k, c, pt, qt, rows, wo)
+    Z, k, c, T, pt, qt, wo, y = ctx[:8]
+    weights = ctx[8] if len(ctx) > 8 else None
+    admix_cy.em(Z, P, Pn, Q, T, k, c, pt, qt, rows, wo, weights)
     if qo is None:
         admix_cy.accelQ(Q, Qn, T, len(Z) if rows is None else len(rows))
     else:
-        admix_cy.accelQMiss(Q, Qn, T, qo)
+        (admix_cy.accelQMiss if weights is None else admix_cy.accelQWeight)(Q, Qn, T, qo)
     if y is not None:
         admix_cy.superQ(Qn, y)
 
@@ -29,15 +30,15 @@ def emQuasi(P, Q, P1, P2, Q1, Q2, ctx, rows=None, qo=None):
         else:
             admix_cy.jumpBatchP(P, P1, P2, ctx[1], ctx[2], rows, Q.shape[1])
     admix_cy.jumpQ(Q, Q1, Q2)
-    if ctx[-1] is not None:
-        admix_cy.superQ(Q, ctx[-1])
+    if ctx[7] is not None:
+        admix_cy.superQ(Q, ctx[7])
 
 
 ##### Initialization
 
 
 ### Centered label products for SVD/ALS initialization, without dosage expansion
-def centerSVD(Z, p_vec, c_vec, W, K, chunk, power, rng, obs=None):
+def centerSVD(Z, p_vec, c_vec, W, K, chunk, power, rng, obs=None, weights=None):
     from hapla import struct, struct_cy
 
     N, D, M = Z.shape[1] // 2, K - 1, int(c_vec[W])
@@ -48,7 +49,7 @@ def centerSVD(Z, p_vec, c_vec, W, K, chunk, power, rng, obs=None):
         (Z[:W], c_vec[: W + 1].astype(np.int64), None if obs is None else obs[:W].astype(np.int64))
     ]
     p = p_vec[:M].astype(float)
-    a = np.ones(M)
+    a = np.ones(M) if weights is None else np.repeat(np.sqrt(weights[:W]), np.diff(c_vec[: W + 1]))
     Q, _ = np.linalg.qr(struct.product(data, p, a, L, chunk, rng=rng), mode="reduced")
     shift = 0.0
     for _ in range(power):
@@ -89,11 +90,28 @@ def _alsStep(Y, V, p_vec, k_vec, c_vec, Q, P=None):
 
 
 ### Alternating least square (ALS) for initializing Q and P
-def factorALS(U, S, V, p_vec, k_vec, c_vec, iter, tole, rng):
+def factorALS(U, S, V, p_vec, k_vec, c_vec, iter, tole, rng, weights=None):
     M, D = U.shape
     Y = np.ascontiguousarray(U * S)
     P = rng.random(size=(M, D + 1), dtype=np.float32)
     admix_cy.projectP(P, k_vec, c_vec)
+    if weights is not None:
+        scale = np.repeat(np.sqrt(weights), k_vec).astype(np.float32)[:, None]
+        B = scale * (P - p_vec[:, None])
+        Q = np.asarray(0.5 * V @ (Y.T @ np.linalg.pinv(B).T), dtype=np.float32)
+        admix_cy.projectQ(Q)
+        Q0 = Q.copy()
+        for _ in range(iter):
+            H = Q @ np.linalg.pinv(Q.T @ Q)
+            P = np.asarray(p_vec[:, None] + 0.5 * (Y @ (V.T @ H)) / scale, dtype=np.float32)
+            admix_cy.projectP(P, k_vec, c_vec)
+            B = scale * (P - p_vec[:, None])
+            Q = np.asarray(0.5 * V @ (Y.T @ np.linalg.pinv(B).T), dtype=np.float32)
+            admix_cy.projectQ(Q)
+            if admix_cy.rmseQ(Q, Q0) < tole:
+                break
+            Q0[:] = Q
+        return P, Q
     H = np.dot(P, np.linalg.pinv(np.dot(P.T, P)))
     Q = 0.5 * np.dot(V, np.dot(Y.T, H))
     H *= p_vec[:, None]

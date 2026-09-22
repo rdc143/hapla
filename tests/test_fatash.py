@@ -16,6 +16,27 @@ from hapla.fatash import refine
 from hapla.formats import readMetadata
 
 
+def test_leave_one_out_emissions_exclude_diploid_sample():
+    rng = np.random.default_rng(7)
+    H, W, K, mass = 6, 4, 3, 2.5
+    Z = rng.integers(0, 2, (H, W), dtype=np.uint8)
+    c = np.arange(0, 2 * W + 1, 2, dtype=np.int64)
+    G = rng.dirichlet(np.ones(K), (H, W))
+    base = np.concatenate([rng.dirichlet(np.ones(2), K).T for _ in range(W)]).ravel()
+    use = np.ones(W, np.uint8)
+    counts = np.zeros_like(base)
+    cy.accumulate(Z, G, use, c, 0, W, counts)
+    actual = cy.emissionsLOO(Z, G, base, counts, use, c, K, 0, W, mass)
+    expected = np.empty_like(actual)
+    for h, w, k in itertools.product(range(H), range(W), range(K)):
+        keep = [x for x in range(H) if x // 2 != h // 2]
+        den = mass + sum(G[x, w, k] for x in keep)
+        num = mass * base[(c[w] + Z[h, w]) * K + k]
+        num += sum(G[x, w, k] for x in keep if Z[x, w] == Z[h, w])
+        expected[h, w, k] = np.log(num / den)
+    np.testing.assert_allclose(actual, expected)
+
+
 ### Enumerate joint state paths and latent refresh events for short chains
 def transition(q, alpha, simple=False):
     e, s = np.exp(-alpha), -np.expm1(-alpha)

@@ -590,6 +590,39 @@ def refineP(const f64[::1] base, const f64[::1] counts,
     return np.asarray(P)
 
 
+### Build emissions after removing both haplotypes of each evaluated sample
+def emissionsLOO(const u8[:, ::1] Z, const f64[:, :, ::1] G,
+                 const f64[::1] base, const f64[::1] counts,
+                 const u8[::1] use, const i64[::1] c, Py_ssize_t K,
+                 Py_ssize_t beg, Py_ssize_t end, f64 mass):
+    cdef Py_ssize_t H = Z.shape[0], W = c.shape[0]-1, h, mate, w, k, z, zm, a
+    cdef f64 den, num
+    cdef f64[:, :, ::1] E = np.zeros((H, end-beg, K))
+    cdef f64[:, ::1] totals = np.zeros((W, K))
+    if H % 2 or G.shape[0] != H or G.shape[1] != end-beg or G.shape[2] != K:
+        raise ValueError("Leave-one-out refinement requires paired posterior haplotypes")
+    if base.shape[0] != c[W]*K or counts.shape[0] != base.shape[0] or mass < 0:
+        raise ValueError("Invalid leave-one-out refinement dimensions")
+    for w in prange(W, nogil=True, schedule='static'):
+        for k in range(K):
+            for a in range(c[w], c[w+1]): totals[w, k] = totals[w, k] + counts[a*K+k]
+    for w in prange(beg, end, nogil=True, schedule='static'):
+        if not use[w]: continue
+        for h in range(H):
+            z = Z[h, w]
+            if z == 255: continue
+            mate = h ^ 1
+            zm = Z[mate, w]
+            for k in range(K):
+                den = totals[w, k] + mass - G[h, w-beg, k] - (
+                    G[mate, w-beg, k] if zm != 255 else 0.0)
+                num = counts[(c[w]+z)*K+k] + mass*base[(c[w]+z)*K+k] - G[h, w-beg, k] - (
+                    G[mate, w-beg, k] if zm == z else 0.0)
+                E[h, w-beg, k] = (log(max(1e-300, num/den)) if den > 0 and num > 0
+                                   else log(max(1e-300, base[(c[w]+z)*K+k])))
+    return np.asarray(E)
+
+
 ### Correct reciprocal phase switches in pairs of haplotypes
 def phaseCorrect(
         u8[:, ::1] D,

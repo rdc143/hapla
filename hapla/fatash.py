@@ -33,6 +33,8 @@ def checkArgs(args):
         raise ValueError("Use increasing alpha exponents and 1..100000 alpha values")
     if args.viterbi and args.save_posteriors:
         raise ValueError("--save-posteriors requires posterior decoding")
+    if getattr(args, "leave_one_out", False) and args.fixed_model:
+        raise ValueError("--leave-one-out requires Baum-Welch fitting, not --fixed-model")
     if args.iter < 1 or not all(
         isfinite(v) and v >= 0 for v in (args.tole, args.p_prior, args.q_prior)
     ):
@@ -192,6 +194,7 @@ def refine(data, P, Q, alpha, args):
     lap = tick
     label = "Log-like" if args.baum_welch else "Objective"
     stop = "no_observations" if n == 0 else "iteration_limit"
+    loo = getattr(args, "leave_one_out", False)
     for it in range(args.iter + 1 if n else 0):
         finish = it == args.iter
         nextP = []
@@ -201,11 +204,26 @@ def refine(data, P, Q, alpha, args):
             prior += cy.penalty(base, p, tp)
             table = cy.emissionTable(p, c, K)
             countP = None if finish else np.zeros_like(p)
+            looP = None
+            if loo:
+                looP = np.zeros_like(p)
+                for i, j, z in haplotypes(Z, size):
+                    q = np.repeat(Q[i // 2 : j // 2], 2, axis=0)
+                    for beg, end in regions:
+                        E = cy.emissions(z, table, c, use, K, beg, end)
+                        G, _, _ = cy.posterior(E, q, alpha, resets=True)
+                        cy.accumulate(z, G, use, c, beg, end, looP)
             for i, j, z in haplotypes(Z, size):
                 q = np.repeat(Q[i // 2 : j // 2], 2, axis=0)
                 for beg, end in regions:
                     E = cy.emissions(z, table, c, use, K, beg, end)
-                    G, C, L = cy.posterior(E, q, alpha, resets=not finish, score=finish)
+                    G, C, L = cy.posterior(
+                        E, q, alpha, resets=True if loo else not finish,
+                        score=False if loo else finish,
+                    )
+                    if loo:
+                        E = cy.emissionsLOO(z, G, base, looP, use, c, K, beg, end, tp)
+                        G, C, L = cy.posterior(E, q, alpha, resets=not finish, score=finish)
                     ll += float(L.mean(axis=1).sum())
                     if not finish:
                         cy.accumulate(z, G, use, c, beg, end, countP)
@@ -255,6 +273,7 @@ def refine(data, P, Q, alpha, args):
         printTiming(f"({it:,})  {label}: {history[-1]['objective']:,.1f}", perf_counter() - lap)
     info = dict(
         mode="baum-welch" if args.baum_welch else "regularized",
+        leave_one_out=loo,
         p_prior=tp,
         q_prior=tq,
         iterations=it,

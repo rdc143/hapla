@@ -242,7 +242,7 @@ cdef inline f32 _computeR(
 ### Accumulate a diploid sample and reuse the denominator for matching labels
 cdef inline void _pair(const f64* p, const f64* q, f64* pt, f64* qt,
                        Py_ssize_t r, Py_ssize_t s, Py_ssize_t K,
-                       bint first, bint second) noexcept nogil:
+                       bint first, bint second, f64 weight) noexcept nogil:
     cdef Py_ssize_t k
     cdef f64 a = 0.0, b = 0.0
     if first and second and r == s:
@@ -250,10 +250,10 @@ cdef inline void _pair(const f64* p, const f64* q, f64* pt, f64* qt,
         if pt != NULL:
             for k in range(K):
                 pt[r+k] += q[k] * a
-                qt[k] += p[r+k] * a
+                qt[k] += weight * p[r+k] * a
         else:
             for k in range(K):
-                qt[k] += p[r+k] * a
+                qt[k] += weight * p[r+k] * a
         return
     if first:
         a = _computeH(&p[r], q, K)
@@ -263,18 +263,18 @@ cdef inline void _pair(const f64* p, const f64* q, f64* pt, f64* qt,
         if pt != NULL:
             for k in range(K):
                 pt[r+k] += q[k] * a
-                qt[k] += p[r+k] * a
+                qt[k] += weight * p[r+k] * a
         else:
             for k in range(K):
-                qt[k] += p[r+k] * a
+                qt[k] += weight * p[r+k] * a
     if second:
         if pt != NULL:
             for k in range(K):
                 pt[s+k] += q[k] * b
-                qt[k] += p[s+k] * b
+                qt[k] += weight * p[s+k] * b
         else:
             for k in range(K):
-                qt[k] += p[s+k] * b
+                qt[k] += weight * p[s+k] * b
 
 
 ### Compile constant-width loops for K=5 and K=6, plus a generic fallback
@@ -287,7 +287,7 @@ ctypedef fused width:
 ### Fit one window with reusable counts and no heap allocation
 cdef inline void _emWindow(width mode, const u8* z, bint missing, const f64* p, f64* out,
                            const f64* q, f64* pt, f64* qt,
-                           Py_ssize_t N, Py_ssize_t C, Py_ssize_t K) noexcept nogil:
+                           Py_ssize_t N, Py_ssize_t C, Py_ssize_t K, f64 weight) noexcept nogil:
     cdef Py_ssize_t i, k, c
     if width is u8:
         K = 5
@@ -299,11 +299,11 @@ cdef inline void _emWindow(width mode, const u8* z, bint missing, const f64* p, 
     if not missing:
         for i in range(N):
             _pair(p, &q[i*K], pt if out != NULL else NULL, &qt[i*K],
-                  z[2*i]*K, z[2*i+1]*K, K, True, True)
+                  z[2*i]*K, z[2*i+1]*K, K, True, True, weight)
     else:
         for i in range(N):
             _pair(p, &q[i*K], pt if out != NULL else NULL, &qt[i*K],
-                  z[2*i]*K, z[2*i+1]*K, K, z[2*i] != 255, z[2*i+1] != 255)
+                  z[2*i]*K, z[2*i+1]*K, K, z[2*i] != 255, z[2*i+1] != 255, weight)
     if out != NULL:
         for c in range(C*K):
             out[c] = p[c] * pt[c]
@@ -316,7 +316,8 @@ cpdef void em(const u8[:, ::1] Z, const f64[::1] P, f64[::1] P_new,
               const f64[:, ::1] Q, f64[:, ::1] T,
               const u32[::1] k_vec, const u32[::1] c_vec,
               f64[:, ::1] pt, f64[:, :, ::1] qt,
-              const u32[::1] rows=None, const u32[::1] obs=None) noexcept nogil:
+              const u32[::1] rows=None, const u32[::1] obs=None,
+              const f64[::1] weights=None) noexcept nogil:
     cdef:
         Py_ssize_t W = Z.shape[0] if rows is None else rows.shape[0]
         Py_ssize_t N = Q.shape[0], K = Q.shape[1], B = min(W, qt.shape[0])
@@ -339,13 +340,13 @@ cpdef void em(const u8[:, ::1] Z, const f64[::1] P, f64[::1] P_new,
             out = NULL if P_new is None else &P_new[l]
             if K == 5:
                 _emWindow[u8](0, &Z[w, 0], missing, &P[l], out, &Q[0, 0], &pt[b, 0],
-                              &qt[b, 0, 0], N, k_vec[w], 5)
+                              &qt[b, 0, 0], N, k_vec[w], 5, 1.0 if weights is None else weights[w])
             elif K == 6:
                 _emWindow[u32](0, &Z[w, 0], missing, &P[l], out, &Q[0, 0], &pt[b, 0],
-                               &qt[b, 0, 0], N, k_vec[w], 6)
+                               &qt[b, 0, 0], N, k_vec[w], 6, 1.0 if weights is None else weights[w])
             else:
                 _emWindow[f64](0, &Z[w, 0], missing, &P[l], out, &Q[0, 0], &pt[b, 0],
-                               &qt[b, 0, 0], N, k_vec[w], K)
+                               &qt[b, 0, 0], N, k_vec[w], K, 1.0 if weights is None else weights[w])
     for t in prange((N+31)//32, schedule='static'):
         for i in range(t*32, min(N, (t+1)*32)):
             for k in range(K):
@@ -475,6 +476,18 @@ cpdef void accelQMiss(
                 Q_tmp[i, k] = 0.0
 
 
+### Normalize Q updates by the effective observed row weight
+cpdef void accelQWeight(const f64[:, ::1] Q, f64[:, ::1] Q_new,
+                        f64[:, ::1] Q_tmp, const f64[::1] q_obs) noexcept nogil:
+    cdef Py_ssize_t i, k, N = Q.shape[0], K = Q.shape[1]
+    for i in prange(N, schedule='guided'):
+        if q_obs[i] > 0:
+            _outerAccelQ(&Q[i, 0], &Q_new[i, 0], &Q_tmp[i, 0], 1.0/q_obs[i], K)
+        else:
+            for k in range(K):
+                Q_new[i, k], Q_tmp[i, k] = Q[i, k], 0.0
+
+
 ### Accelerated jump for Q (QN)
 cpdef void jumpQ(
         f64[:, ::1] Q0,
@@ -534,7 +547,8 @@ cdef f64 _likelihood(width mode, const u8* z, const f64* p, const f64* q,
 ### Reuse one scalar per window for deterministic likelihood reduction
 cpdef f64 likelihood(const u8[:, ::1] Z, const f64[::1] P,
                       const f64[:, ::1] Q, const u32[::1] c_vec,
-                      f64[::1] work, const u32[::1] obs=None) noexcept nogil:
+                      f64[::1] work, const u32[::1] obs=None,
+                      const f64[::1] weights=None, f64 norm=0.0) noexcept nogil:
     cdef Py_ssize_t w, N = Q.shape[0], K = Q.shape[1]
     cdef f64 total = 0.0
     for w in prange(Z.shape[0], schedule='static'):
@@ -550,8 +564,8 @@ cpdef f64 likelihood(const u8[:, ::1] Z, const f64[::1] P,
             work[w] = _likelihood[f64](0, &Z[w, 0], &P[c_vec[w]], &Q[0, 0], N, K,
                                        obs is not None and obs[w] != 2*N)
     for w in range(Z.shape[0]):
-        total += work[w]
-    return total * (<f64>K / (<f64>P.shape[0] * (2*N)))
+        total += work[w] * (1.0 if weights is None else weights[w])
+    return total / (norm if norm > 0 else (<f64>P.shape[0] * (2*N) / K))
 
 
 ### Projection function for P (f32)

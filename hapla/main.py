@@ -87,6 +87,13 @@ def main():
             help="Number of power iterations to perform (11)",
         )
         sub.add_argument("--seed", type=int, default=42, metavar="INT", help="Random seed (42)")
+    adm.add_argument(
+        "--snp-vcf",
+        "--bcf",
+        dest="snp_vcf",
+        metavar="FILE",
+        help="Append phased biallelic SNPs, weighted to one row per cluster window",
+    )
     for sub in (lai, eva):
         sub.add_argument(
             "-q", "--qfile", metavar="FILE", help="Path to file with ancestry proportions"
@@ -351,6 +358,13 @@ def main():
     )
     lai.add_argument(
         "--q-prior", type=float, default=10, help="Q pseudocount mass per individual (10)"
+    )
+    lai.add_argument(
+        "--leave-one-out",
+        "--refine-leave-one-out",
+        dest="leave_one_out",
+        action="store_true",
+        help="Exclude each sample's two haplotypes from its refined P emissions",
     )
     lai.add_argument(
         "--alpha-min",

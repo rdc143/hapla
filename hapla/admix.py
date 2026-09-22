@@ -22,11 +22,14 @@ from hapla.runtime import (
 
 ### hapla admix
 def main(args):
+    snp_vcf = getattr(args, "snp_vcf", None)
     # Check input
     if args.supervised is not None and args.projection is not None:
         raise ValueError("Choose either --supervised or --projection")
     if (args.filelist is None) == (args.clusters is None):
         raise ValueError("Provide exactly one of --clusters or --filelist")
+    if snp_vcf is not None and args.projection is not None:
+        raise ValueError("Weighted SNP input is not supported in projection mode")
     if not args.prefix or any(x in args.prefix for x in ("/", "\\")):
         raise ValueError("Output chromosome prefix must be a filename component")
     if not (args.K is not None and 1 < args.K < 100000):
@@ -70,7 +73,7 @@ def main(args):
     import numpy as np
 
     from hapla import admix_cy, functions, struct_cy
-    from hapla.formats import mapLabels, readMetadata, readPaths, sampleIndices
+    from hapla.formats import mapLabels, readMetadata, readPaths, readWindows, sampleIndices
 
     # Read chromosome metadata once and concatenate cluster counts
     Z_list, z_ids, k_vec, w_vec = readMetadata(args.clusters, args.filelist)
@@ -118,6 +121,65 @@ def main(args):
         B += w_vec[z]
     del z_tmp
 
+    # Append SNP rows after matching each site to its native cluster window.
+    weights = None
+    if snp_vcf is not None:
+        if F != 1:
+            raise ValueError("Weighted SNP input currently requires one cluster prefix")
+        from hapla.vcf_cy import Reader
+
+        rows = readWindows(Z_list[0])
+        by_chrom = {}
+        for w, row in enumerate(rows):
+            by_chrom.setdefault(row[0].removeprefix("chr"), []).append((row[1], row[2], w))
+        by_chrom = {
+            key: (np.asarray([x[0] for x in val]), np.asarray([x[1] for x in val]),
+                  np.asarray([x[2] for x in val]))
+            for key, val in by_chrom.items()
+        }
+        with Reader(snp_vcf, max(0, args.threads - 1), phased=True) as src:
+            index = {s: i for i, s in enumerate(src.samples)}
+            if any(s not in index for s in q_ids):
+                raise ValueError("Cluster samples are missing from the SNP VCF/BCF")
+            sel = np.asarray([index[s] for s in q_ids], dtype=np.int64)
+            hsel = np.ravel(np.column_stack((2 * sel, 2 * sel + 1)))
+            chunks, parents = [], []
+            while not src.finished:
+                cap = 65536
+                raw = np.empty((cap, 2 * len(src.samples)), np.uint8)
+                pos = np.empty(cap, np.int64)
+                chrom = np.empty(cap, np.int32)
+                miss = np.empty(cap, np.uint8)
+                got = src.read_into(raw, pos, chrom, miss)
+                if not got:
+                    break
+                keep_rows, keep_parent = [], []
+                for r in range(got):
+                    key = src.contigs[chrom[r]].removeprefix("chr")
+                    interval = by_chrom.get(key)
+                    if interval is not None:
+                        beg, end, idx = interval
+                        j = np.searchsorted(beg, pos[r], side="right") - 1
+                        if j >= 0 and pos[r] <= end[j]:
+                            keep_rows.append(r)
+                            keep_parent.append(idx[j])
+                if keep_rows:
+                    chunks.append(raw[np.asarray(keep_rows)][:, hsel])
+                    parents.extend(keep_parent)
+        if not parents:
+            raise ValueError("No SNPs overlap the cluster windows")
+        parent = np.asarray(parents, np.int64)
+        counts = np.bincount(parent, minlength=W)
+        snp_weights = 1.0 / counts[parent]
+        Z = np.vstack((Z, np.vstack(chunks)))
+        k_vec = np.concatenate((k_vec, np.full(len(parent), 2, np.uint32)))
+        weights = np.concatenate((np.ones(W), snp_weights)).astype(float)
+        W = Z.shape[0]
+        args.batches = 1
+        print(f"Added {len(parent):,} SNPs ({snp_weights.sum():,.1f} window equivalents).", flush=True)
+
+    M = int(np.sum(k_vec, dtype=np.uint64))
+
     # Histogram validation also supplies observed-only means and window counts
     c_tmp = np.insert(np.cumsum(k_vec, dtype=np.uint32), 0, 0)
     p_vec = None if args.random_init or args.supervised or args.projection else np.empty(M)
@@ -136,7 +198,11 @@ def main(args):
     del obs
 
     # Count haplotype cluster alleles
-    L_nrm = 2.0 * float(M) * float(N)
+    if weights is None:
+        L_nrm = 2.0 * float(M) * float(N)
+    else:
+        q_obs = np.sum((Z.reshape(W, N, 2) != 255) * weights[:, None, None], axis=(0, 2))
+        L_nrm = 2.0 * float(N) * float(np.dot(weights, k_vec))
     c_vec = c_tmp * args.K
 
     # Print information
@@ -232,7 +298,7 @@ def main(args):
             W_s = f_vec[ceil(F / args.subsampling)] if F > 1 else W
             try:
                 U, S, V = functions.centerSVD(
-                    Z, p_vec, c_tmp, W_s, args.K, args.chunk, args.power, rng, w_obs
+                    Z, p_vec, c_tmp, W_s, args.K, args.chunk, args.power, rng, w_obs, weights
                 )
             except ValueError:
                 if W_s == W:
@@ -269,6 +335,7 @@ def main(args):
                     args.als_iter,
                     args.als_tole,
                     rng,
+                    weights,
                 )
             del U
             printTiming("SVD/ALS complete.", time() - ts)
@@ -306,9 +373,9 @@ def main(args):
     B = min(64, W)
     pt = np.empty((B, int(np.max(k_vec)) * args.K))
     qt = np.empty((B, N, args.K))
-    ctx = (Z, k_vec, c_vec, T, pt, qt, w_obs, y)
+    ctx = (Z, k_vec, c_vec, T, pt, qt, w_obs, y, weights)
     like = np.empty(W)
-    L_pre = admix_cy.likelihood(Z, P, Q, c_vec, like, w_obs)
+    L_pre = admix_cy.likelihood(Z, P, Q, c_vec, like, w_obs, weights, L_nrm)
     if not np.isfinite(L_pre):
         raise ValueError("The initial model assigns zero probability to an observed cluster")
     stats["initial_loglike"] = L_pre * L_nrm
@@ -323,7 +390,7 @@ def main(args):
     # Keep the batch schedule and checkpoint full-data convergence checks
     batches = min(args.batches, W)
     s_win = np.arange(W, dtype=np.uint32)
-    L_pre = admix_cy.likelihood(Z, P, Q, c_vec, like, w_obs)
+    L_pre = admix_cy.likelihood(Z, P, Q, c_vec, like, w_obs, weights, L_nrm)
     L_bat = L_pre
     P_save = Q_save = None
     if batches == 1:
@@ -354,7 +421,7 @@ def main(args):
         # Always score the actual final parameters, including a partial check interval
         if it % args.check and it != args.iter:
             continue
-        L_cur = admix_cy.likelihood(Z, P, Q, c_vec, like, w_obs)
+        L_cur = admix_cy.likelihood(Z, P, Q, c_vec, like, w_obs, weights, L_nrm)
         if not np.isfinite(L_cur):
             raise ValueError("Non-finite log-likelihood during ancestry estimation")
         if batches > 1:
@@ -363,7 +430,7 @@ def main(args):
                 print(f"Mini-batches: {batches}", flush=True)
                 L_bat = float("-inf")
                 functions.emQuasi(P, Q, P1, P2, Q1, Q2, ctx, qo=q_obs)
-                L_cur = admix_cy.likelihood(Z, P, Q, c_vec, like, w_obs)
+                L_cur = admix_cy.likelihood(Z, P, Q, c_vec, like, w_obs, weights, L_nrm)
                 if batches == 1:
                     P_save = None if P1 is None else P.copy()
                     Q_save = Q.copy()
@@ -377,7 +444,7 @@ def main(args):
                     P[:] = P_save
                 Q[:] = Q_save
                 functions.emStep(P, Q, P if P1 is not None else None, Q, ctx, qo=q_obs)
-                L_cur = admix_cy.likelihood(Z, P, Q, c_vec, like, w_obs)
+                L_cur = admix_cy.likelihood(Z, P, Q, c_vec, like, w_obs, weights, L_nrm)
                 n_retry += 1
                 if L_cur < L_pre:
                     if P_save is not None:
@@ -391,7 +458,7 @@ def main(args):
                     P1[:] = P
                 Q1[:] = Q
                 functions.emStep(P, Q, P if P1 is not None else None, Q, ctx, qo=q_obs)
-                check = admix_cy.likelihood(Z, P, Q, c_vec, like, w_obs)
+                check = admix_cy.likelihood(Z, P, Q, c_vec, like, w_obs, weights, L_nrm)
                 if check < L_cur:
                     if P1 is not None:
                         P[:] = P1
