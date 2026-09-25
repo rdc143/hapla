@@ -221,7 +221,7 @@ def fitWindow(const u8[:, ::1] G, double alpha=0.1, double min_freq=0.005,
                     counts=np.empty((0, B), dtype=np.uint64), sizes=np.empty(0, dtype=np.uint64),
                     stats=dict(unique=0, observed=0, missing=H, K=0, growth_passes=0,
                                prune_passes=0, distance_pairs=0, distortion=0, capped=False))
-    n_min = int(min_mac) if min_mac is not None else math.ceil(H_obs * min_freq)
+    n_min = max(math.ceil(H_obs * min_freq), int(min_mac or 0))
     if n_min > <u64>H_obs:
         raise ValueError("Minimum cluster count exceeds the observed haplotypes in this window")
 

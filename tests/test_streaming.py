@@ -441,7 +441,10 @@ class FormatAndPipelineTests(TemporaryTests):
             admix = self.root / f"admix{missing}"
             calls = (".|0" if missing else "0|0", "0|1", "1|1")
             writeVcf(vcf, [("1", i + 1, calls) for i in range(32)])
-            command("cluster", "--vcf", vcf, "--size", 8, "--medians", "--out", prefix)
+            command(
+                "cluster", "--vcf", vcf, "--size", 8, "--min-mac", 1,
+                "--medians", "--out", prefix,
+            )
             command(
                 "admix",
                 "--clusters",

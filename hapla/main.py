@@ -133,7 +133,11 @@ def main():
         help="Minimum haplotype cluster frequency (0.005)",
     )
     clu.add_argument(
-        "--min-mac", type=int, metavar="INT", help="Minimum haplotype cluster allele count"
+        "--min-mac",
+        type=int,
+        default=5,
+        metavar="INT",
+        help="Minimum haplotype cluster count, alongside --min-freq (5)",
     )
     clu.add_argument(
         "--max-clusters",

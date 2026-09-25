@@ -20,7 +20,7 @@ def reference(G, alpha=0.1, min_freq=0.005, min_mac=None, K_max=255):
     H = H ^ flip
     X, inverse, weights = np.unique(H[:, ::-1], axis=0, return_inverse=True, return_counts=True)
     X = X[:, ::-1]
-    minimum = min_mac or int(np.ceil(len(H) * min_freq))
+    minimum = max(int(np.ceil(len(H) * min_freq)), min_mac or 0)
     threshold = int(np.ceil(alpha * G.shape[0]))
     z = np.zeros(len(X), dtype=int)
     centers = [(2 * H.sum(0) > len(H)).astype(np.uint8)]
@@ -174,20 +174,20 @@ class PackedClusteringTests(unittest.TestCase):
         G = np.concatenate(
             (np.repeat(patterns, 2, axis=0).T, np.full((8, 2), 255, np.uint8)), axis=1
         )
-        result = fitWindow(G, min_mac=1)
+        result = fitWindow(G, min_freq=1e-9, min_mac=1)
         self.assertEqual(result["stats"]["K"], 255)
         np.testing.assert_array_equal(np.unique(result["labels"][:-2]), np.arange(255))
         np.testing.assert_array_equal(result["labels"][-2:], [255, 255])
         self.assertFalse(result["stats"]["capped"])
-        self.checkFlip(G, np.ones(8, np.uint8), min_mac=1)
+        self.checkFlip(G, np.ones(8, np.uint8), min_freq=1e-9, min_mac=1)
 
     def test_cluster_cap_never_labels_observed_haplotypes_missing(self):
         G = ((np.arange(256)[:, None] >> np.arange(8)) & 1).astype(np.uint8).T.copy()
-        result = fitWindow(G, min_mac=1)
+        result = fitWindow(G, min_freq=1e-9, min_mac=1)
         self.assertTrue(result["stats"]["capped"])
         self.assertEqual(result["stats"]["K"], 255)
         self.assertTrue(np.all(result["labels"] < 255))
-        self.checkFlip(G, np.array([0, 1] * 4, np.uint8), min_mac=1)
+        self.checkFlip(G, np.array([0, 1] * 4, np.uint8), min_freq=1e-9, min_mac=1)
 
     def test_missing_windows_and_frequency_denominator(self):
         G = np.array([[0, 0, 1, 255], [0, 0, 1, 0]], np.uint8)
@@ -206,6 +206,11 @@ class PackedClusteringTests(unittest.TestCase):
         self.assertEqual(result["stats"]["K"], 1)
         same = fitWindow(np.zeros((16, 4), np.uint8), K_max=1)
         self.assertEqual(same["stats"]["K"], 1)
+
+    def test_minimum_count_is_combined_with_frequency(self):
+        G = np.array([[0] * 95 + [1] * 5] * 8, np.uint8)
+        result = self.checkReference(G, min_freq=0.1, min_mac=5)
+        self.assertEqual(result["stats"]["K"], 1)
 
     def test_limits_and_input_validation(self):
         G = np.random.default_rng(44).integers(0, 2, (8, 100), dtype=np.uint8)

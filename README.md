@@ -127,7 +127,7 @@ PLINK output marks the diploid genotype missing if either haplotype is missing.
 | `-s`, `--step INT` | Window size | Step for overlapping `--size` windows |
 | `-p`, `--lmbda FLOAT` | `0.1` | Window fraction defining the Hamming-distance growth threshold |
 | `--min-freq FLOAT` | `0.005` | Minimum cluster frequency among observed haplotypes |
-| `--min-mac INT` | — | Minimum cluster count, overriding `--min-freq` |
+| `--min-mac INT` | `5` | Minimum cluster count, combined with `--min-freq` |
 | `--max-clusters INT` | `255` | Maximum clusters per window, from 1 to 255 |
 | `--max-iterations INT` | `1000` | Iteration limit for fitting each window |
 | `--tail {include,drop}` | `include` | Keep or omit incomplete final fixed-size windows |
@@ -138,6 +138,8 @@ For overlapping windows, a short tail is added only if it covers new variants.
 A `--windows` file may end with the genotype record count as an EOF marker.
 The fitter deduplicates haplotypes, grows binary medians using packed Hamming
 distances, then reassigns haplotypes from clusters below the size threshold.
+The threshold is the larger of `ceil(observed haplotypes * --min-freq)` and
+`--min-mac`.
 The 255-cluster cap keeps assignments to one byte per haplotype. A count
 threshold above the observed haplotype count is invalid. Fitting stops if a
 window does not converge.
